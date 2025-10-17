@@ -1,19 +1,21 @@
 {
-{
-  "name": "backend",
+  "name": "qrmanager-backend",
   "version": "1.0.0",
+  "description": "Backend Express para QR Manager",
+  "private": true,
   "main": "server.js",
+  "engines": {
+    "node": ">=18 <21"
+  },
   "scripts": {
     "start": "node server.js",
-    "import:sql": "node scripts/import-sql.js"
-  }
-}
-
+    "import:sql": "node scripts/import-sql.js",
+    "dev": "nodemon server.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
-    "dotenv": "^17.2.3",
+    "dotenv": "^16.4.5",
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.2",
     "mysql2": "^3.15.2",
