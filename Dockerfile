@@ -3,15 +3,17 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Instala dependencias primero (aprovecha caché de Docker)
+# Instalar solo dependencias de producción
 COPY package*.json ./
-RUN npm ci || npm install
+RUN npm ci --omit=dev || npm install --omit=dev
 
-# Copia el resto del código del backend
+# Copiar el resto del código
 COPY . .
 
 ENV NODE_ENV=production
 
-# --- PRIMER DESPLIEGUE: importamos la BD y arrancamos ---
-# Cuando el import ya haya corrido OK, CAMBIA esta línea por:  CMD ["npm","start"]
-CMD ["sh","-lc","npm run import:sql && npm start"]
+# (Opcional) expone el puerto en el que escucha tu server (4010 por defecto)
+EXPOSE 4010
+
+# Arrancar el servidor SIN importar la BD
+CMD ["npm","start"]
