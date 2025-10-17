@@ -33,24 +33,13 @@ const TABLE_QR_SCANS    = process.env.QR_SCANS_TABLE || "qr_scans";
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "http://localhost:3000").trim();
 
 /* -------------------- MIDDLEWARES GLOBALES -------------------- */
-const CORS_ORIGINS = (process.env.CORS_ORIGIN || "")
-  .split(",")
-  .map(s => s.trim())
-  .filter(Boolean);
-
-// Si no configuraste CORS_ORIGIN, deja localhost como fallback
-const defaultCors = [
-  "http://localhost:3000",
-  "http://localhost:3001",
-  "http://localhost:3002",
-  "http://localhost:3003",
-];
-const allowList = CORS_ORIGINS.length ? CORS_ORIGINS : defaultCors;
-
-app.use(cors({
-  origin: allowList,
-  credentials: true,
-}));
+/** Opción A (abierto): permite cualquier origen, incluido *.up.railway.app */
+app.use(
+  cors({
+    origin: true,       // refleja el Origin del request (permite todos)
+    credentials: true,  // no usamos cookies, pero no estorba
+  })
+);
 
 app.use(express.json({ limit: "2mb" }));
 
