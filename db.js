@@ -2,14 +2,23 @@
 require("dotenv").config();
 const mysql = require("mysql2/promise");
 
-// Toma primero tus variables (DB_*) y, si no existen,
-// usa las que suele dar Railway (MYSQL*).
-const DB_HOST = process.env.DB_HOST || process.env.MYSQLHOST || "127.0.0.1";
-const DB_PORT = Number(process.env.DB_PORT || process.env.MYSQLPORT || 3306);
-const DB_USER = process.env.DB_USER || process.env.MYSQLUSER || "root";
-const DB_PASSWORD =
-  process.env.DB_PASSWORD ?? process.env.DB_PASS ?? process.env.MYSQLPASSWORD ?? "";
-const DB_NAME = process.env.DB_NAME || process.env.MYSQLDATABASE || "qrmanager";
+// ==== Requerir variables (no usar defaults peligrosos en prod) ====
+const DB_HOST = process.env.DB_HOST || process.env.MYSQLHOST;
+const DB_PORT = Number(process.env.DB_PORT || process.env.MYSQLPORT);
+const DB_USER = process.env.DB_USER || process.env.MYSQLUSER;
+const DB_PASSWORD = process.env.DB_PASSWORD ?? process.env.DB_PASS ?? process.env.MYSQLPASSWORD;
+const DB_NAME = process.env.DB_NAME || process.env.MYSQLDATABASE;
+
+function assertEnv(name, value) {
+  if (!value && value !== 0) {
+    throw new Error(`[DB] Falta variable de entorno: ${name}`);
+  }
+}
+assertEnv("DB_HOST/MYSQLHOST", DB_HOST);
+assertEnv("DB_PORT/MYSQLPORT", DB_PORT);
+assertEnv("DB_USER/MYSQLUSER", DB_USER);
+assertEnv("DB_PASSWORD", DB_PASSWORD);
+assertEnv("DB_NAME/MYSQLDATABASE", DB_NAME);
 
 const pool = mysql.createPool({
   host: DB_HOST,
@@ -21,6 +30,10 @@ const pool = mysql.createPool({
   connectionLimit: 10,
   queueLimit: 0,
   charset: "utf8mb4_unicode_ci",
+  timezone: "Z",                 // UTC
+  multipleStatements: false,     // seguridad
+  enableKeepAlive: true,
+  keepAliveInitialDelay: 0,
 });
 
 // Verificación simple al arrancar (no tumba el proceso si falla)
