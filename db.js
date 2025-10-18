@@ -3,74 +3,44 @@ require("dotenv").config();
 const mysql = require("mysql2/promise");
 
 /* ---------------------------------------------
-   Utilidades
+   Solo usamos MYSQL_URL (formato):
+   mysql://USER:PASS@HOST:PORT/DBNAME
+   + DB_SSL=true/false (recomendado: true en cloud)
 ----------------------------------------------*/
 const norm = (v) => (typeof v === "string" ? v.trim() : v);
-const toInt = (v, dft = NaN) => {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : dft;
-};
 
 function parseMysqlUrl(raw) {
+  const url = norm(raw || "");
+  if (!url) throw new Error("[DB] Falta MYSQL_URL");
+  let u;
   try {
-    const u = new URL(raw); // mysql://user:pass@host:port/dbname
-    return {
-      host: norm(u.hostname),
-      port: toInt(u.port || 3306, 3306),
-      user: norm(decodeURIComponent(u.username || "")),
-      password: norm(decodeURIComponent(u.password || "")),
-      database: norm(u.pathname ? u.pathname.replace(/^\//, "") : ""),
-    };
+    u = new URL(url);
   } catch {
-    return null;
+    throw new Error("[DB] MYSQL_URL inválida. Ej: mysql://user:pass@host:3306/db");
   }
+  if (u.protocol !== "mysql:") {
+    throw new Error('[DB] MYSQL_URL debe iniciar con "mysql://"...');
+  }
+  return {
+    host: u.hostname,
+    port: Number(u.port || 3306),
+    user: decodeURIComponent(u.username || ""),
+    password: decodeURIComponent(u.password || ""),
+    database: (u.pathname || "").replace(/^\//, ""),
+  };
 }
 
-function required(label, value) {
-  if (value === 0) return value;
-  if (value === null || value === undefined || value === "") {
-    throw new Error(`[DB] Falta variable de entorno: ${label}`);
-  }
-  return value;
-}
+// Lee config únicamente desde MYSQL_URL
+const cfg = parseMysqlUrl(process.env.MYSQL_URL);
 
-/* ---------------------------------------------
-   Lectura de variables (prioridades)
-   1) MYSQL_URL
-   2) DB_* (DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME)
-   3) MYSQL* (MYSQLHOST/MYSQLPORT/...)
-----------------------------------------------*/
-let cfg = { host: null, port: null, user: null, password: null, database: null };
-
-// 1) MYSQL_URL
-const url = norm(process.env.MYSQL_URL || process.env.MYSQL_PUBLIC_URL);
-const parsedFromUrl = url ? parseMysqlUrl(url) : null;
-if (parsedFromUrl) cfg = { ...cfg, ...parsedFromUrl };
-
-// 2) DB_* (si algo falta, toma de aquí)
-cfg.host     = cfg.host     || norm(process.env.DB_HOST);
-cfg.port     = cfg.port     || toInt(process.env.DB_PORT);
-cfg.user     = cfg.user     || norm(process.env.DB_USER);
-cfg.password = cfg.password || norm(process.env.DB_PASSWORD ?? process.env.DB_PASS);
-cfg.database = cfg.database || norm(process.env.DB_NAME);
-
-// 3) MYSQL* (Railway referencias)
-cfg.host     = cfg.host     || norm(process.env.MYSQLHOST);
-cfg.port     = cfg.port     || toInt(process.env.MYSQLPORT);
-cfg.user     = cfg.user     || norm(process.env.MYSQLUSER);
-cfg.password = cfg.password || norm(process.env.MYSQLPASSWORD);
-cfg.database = cfg.database || norm(process.env.MYSQLDATABASE);
-
-// Validación explícita
-cfg.host     = required("DB_HOST/MYSQLHOST", cfg.host);
-cfg.port     = Number(required("DB_PORT/MYSQLPORT", cfg.port));
-cfg.user     = required("DB_USER/MYSQLUSER", cfg.user);
-cfg.password = required("DB_PASSWORD/MYSQLPASSWORD/DB_PASS", cfg.password);
-cfg.database = required("DB_NAME/MYSQLDATABASE", cfg.database);
-
-// SSL opcional (recomendado en cloud). Puedes usar DB_SSL=true
-const USE_SSL = /^(1|true|yes)$/i.test(process.env.DB_SSL || "");
+// SSL opcional (recomendado en cloud)
+const USE_SSL = /^(1|true|yes)$/i.test(process.env.DB_SSL || "true");
 const ssl = USE_SSL ? { rejectUnauthorized: false } : undefined;
+
+// Validaciones mínimas
+if (!cfg.host || !cfg.user || !cfg.database || !cfg.port || Number.isNaN(cfg.port)) {
+  throw new Error("[DB] MYSQL_URL incompleta (host/user/pass/port/db)");
+}
 
 /* ---------------------------------------------
    Pool de conexiones
@@ -98,9 +68,14 @@ const pool = mysql.createPool({
 (async () => {
   try {
     const [rows] = await pool.query("SELECT 1 AS ok");
-    console.log(
-      `[DB] Conectado -> ${cfg.user}@${cfg.host}:${cfg.port}/${cfg.database} OK=${rows?.[0]?.ok}`
-    );
+    console.log("[DB] Config usada:", {
+      host: cfg.host,
+      port: cfg.port,
+      user: cfg.user,
+      database: cfg.database,
+      ssl: !!ssl,
+    });
+    console.log(`[DB] Conectado OK=${rows?.[0]?.ok}`);
   } catch (err) {
     console.error("[DB] Error conectando a MySQL:", err?.sqlMessage || err?.message || err);
   }
