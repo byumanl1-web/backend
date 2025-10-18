@@ -151,4 +151,6 @@ pool.execute = async function patchedExecute(sql, params) {
   }
 })();
 
+// al final de db.js
 module.exports = { pool, cfg, sslEnabled: !!ssl };
+

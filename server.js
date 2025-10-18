@@ -6,10 +6,13 @@ const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const QRCode = require("qrcode");
+const crypto = require("crypto");
 
 const adminRouter = require("./routes/admin");
 const motoristasRouter = require("./routes/motoristas");
-const pool = require("./db");
+
+// 🔧 Import único y correcto de la DB
+const { pool, cfg, sslEnabled } = require("./db");
 
 /* -------------------- APP -------------------- */
 const app = express();
@@ -37,34 +40,159 @@ const PUBLIC_BASE_URL = (
 ).trim();
 
 /* -------------------- MIDDLEWARES GLOBALES -------------------- */
-app.use(
-  cors({
-    origin: true,       // permite cualquier origen (útil para *.up.railway.app)
-    credentials: true,  // no usamos cookies, pero no estorba
-  })
-);
+app.use(cors({
+  origin(origin, cb) {
+    // permite cualquier origen; se loguea una vez
+    if (origin) {
+      if (!global.__seenOrigins) global.__seenOrigins = new Set();
+      if (!global.__seenOrigins.has(origin)) {
+        console.log("[CORS] Permitido origin:", origin);
+        global.__seenOrigins.add(origin);
+      }
+    }
+    cb(null, true);
+  },
+  credentials: true,
+}));
 app.use(express.json({ limit: "2mb" }));
+
+/* -------------------- LOGS HTTP DETALLADOS -------------------- */
+const lastRequests = [];
+const MAX_LAST = 200;
+function genId() { return crypto.randomBytes(8).toString("hex"); }
+
+app.use((req, res, next) => {
+  const reqId = req.get("x-request-id") || genId();
+  req.reqId = reqId;
+
+  const t0 = Date.now();
+  const { method } = req;
+  const url = req.originalUrl || req.url;
+
+  const baseInfo = {
+    ts: new Date().toISOString(),
+    id: reqId,
+    method,
+    url,
+    ip: req.ip,
+    origin: req.get("origin") || null,
+    referer: req.get("referer") || null,
+    userAgent: req.get("user-agent") || null,
+  };
+
+  res.setHeader("x-request-id", reqId);
+  res.setHeader("x-backend", "qrmanager-api");
+  res.setHeader("x-api-prefix", API);
+
+  res.on("finish", () => {
+    const ms = Date.now() - t0;
+    const status = res.statusCode;
+    const length = res.getHeader("content-length") || "-";
+    const msg = [
+      `[HTTP] #${reqId}`, method, url, "->", status,
+      `(${ms}ms, ${length}B)`,
+      `ip=${baseInfo.ip}`,
+      baseInfo.origin ? `origin=${baseInfo.origin}` : "",
+      baseInfo.referer ? `referer=${baseInfo.referer}` : "",
+    ].filter(Boolean).join(" ");
+    console.log(msg);
+
+    lastRequests.push({ ...baseInfo, status, ms, length: String(length) });
+    while (lastRequests.length > MAX_LAST) lastRequests.shift();
+  });
+
+  next();
+});
+
+app.use((req, _res, next) => {
+  if (req.method === "OPTIONS") {
+    console.log(`[CORS][PRE-FLIGHT] #${req.reqId} ${req.headers.origin || "-"} ${req.headers["access-control-request-method"] || "-"} ${req.originalUrl}`);
+  }
+  next();
+});
+
+/* -------------------- ENDPOINTS DE DEBUG -------------------- */
+app.get("/__debug/last-requests", (_req, res) => {
+  res.json({
+    count: lastRequests.length,
+    items: lastRequests.slice().reverse().slice(0, 50),
+  });
+});
+
+app.get("/__debug/env", (_req, res) => {
+  const mask = (s = "") => (s.length <= 6 ? "***" : s.slice(0,2) + "***" + s.slice(-2));
+  let parsedUrl = "INVALID_URL";
+  try {
+    const u = new URL(process.env.MYSQL_URL || "");
+    parsedUrl = {
+      protocol: u.protocol, host: u.hostname, port: u.port, user: u.username,
+      pass: mask(decodeURIComponent(u.password || "")),
+      db: (u.pathname || "").replace(/^\//,""),
+    };
+  } catch {}
+  res.json({
+    NODE_ENV: process.env.NODE_ENV,
+    PORT: process.env.PORT,
+    API_PREFIX: process.env.API_PREFIX,
+    PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL,
+    MYSQL_URL: parsedUrl,
+    DB_SSL: process.env.DB_SSL,
+    sslEnabled,
+  });
+});
+
+app.get("/__debug/db/ping", async (_req, res) => {
+  try {
+    const [r] = await pool.query("SELECT 1 AS ok");
+    res.json({ ok: true, result: r[0] });
+  } catch (e) {
+    res.status(500).json({ ok: false, code: e.code || e.name, message: e.message });
+  }
+});
+
+app.get("/__debug/db/info", async (_req, res) => {
+  try {
+    const [v] = await pool.query("SELECT VERSION() AS version");
+    const [ts] = await pool.query("SELECT NOW() AS now_utc");
+    res.json({
+      ok: true,
+      version: v?.[0]?.version,
+      now_utc: ts?.[0]?.now_utc,
+      cfg: { host: cfg.host, port: cfg.port, user: cfg.user, database: cfg.database, ssl: sslEnabled },
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, code: e.code || e.name, message: e.message });
+  }
+});
+
+// Endpoint para que el front verifique conectividad
+app.get(`${API}/debug/echo`, (req, res) => {
+  res.json({
+    ok: true,
+    requestId: req.reqId,
+    method: req.method,
+    url: req.originalUrl,
+    ip: req.ip,
+    origin: req.get("origin") || null,
+    referer: req.get("referer") || null,
+    userAgent: req.get("user-agent") || null,
+    now: new Date().toISOString(),
+  });
+});
 
 /* -------------------- HELPERS -------------------- */
 const normStr  = (v) => (typeof v === "string" ? v.trim() : v);
 const safeEmail = (v) => (normStr(v) || "").toString().trim().toLowerCase();
 
 async function setPasswordHash(userId, hash) {
-  // Intenta guardar en password_hash; si no existe, en passwordHash
   try {
-    await pool.execute(
-      `UPDATE ${TABLE_MOTORISTAS} SET password_hash = ? WHERE id = ?`,
-      [hash, userId]
-    );
+    await pool.execute(`UPDATE ${TABLE_MOTORISTAS} SET password_hash = ? WHERE id = ?`, [hash, userId]);
     return;
   } catch (e) {
     if (e?.code !== "ER_BAD_FIELD_ERROR") throw e;
   }
   try {
-    await pool.execute(
-      `UPDATE ${TABLE_MOTORISTAS} SET passwordHash = ? WHERE id = ?`,
-      [hash, userId]
-    );
+    await pool.execute(`UPDATE ${TABLE_MOTORISTAS} SET passwordHash = ? WHERE id = ?`, [hash, userId]);
   } catch (e2) {
     console.error("[setPasswordHash] No existe password_hash/passwordHash:", e2?.message || e2);
     throw e2;
@@ -86,23 +214,16 @@ function authRequired(req, res, next) {
 }
 function requireAdmin(req, res, next) {
   if (!req.user) return res.status(401).json({ error: "No autenticado" });
-  if ((req.user.role || "user") !== "admin")
-    return res.status(403).json({ error: "Solo admin" });
+  if ((req.user.role || "user") !== "admin") return res.status(403).json({ error: "Solo admin" });
   next();
 }
 function requireDriver(req, res, next) {
   if (!req.user) return res.status(401).json({ error: "No autenticado" });
-  if ((req.user.role || "") !== "driver")
-    return res.status(403).json({ error: "Solo motoristas" });
+  if ((req.user.role || "") !== "driver") return res.status(403).json({ error: "Solo motoristas" });
   next();
 }
 
 /* -------------------- LOGIN ADMIN -------------------- */
-/*
- * IMPORTANTE:
- * Usa ADMIN_EMAIL y ADMIN_PASS desde variables de entorno.
- * Fallback temporal con tus credenciales: cámbialas en Railway y luego elimina este fallback.
- */
 app.post(`${API}/login`, (req, res) => {
   const email = safeEmail(req.body?.email);
   const thePassword = (req.body?.password || "").trim();
@@ -130,7 +251,6 @@ app.post(`${API}/driver/login`, async (req, res) => {
       return res.status(400).json({ error: "EMAIL_OR_PASSWORD_MISSING", dbg });
     }
 
-    // 1) password_hash
     let rows;
     dbg.step = "query:password_hash";
     try {
@@ -143,7 +263,6 @@ app.post(`${API}/driver/login`, async (req, res) => {
       rows = r[0];
       dbg.schema = "password_hash";
     } catch (e) {
-      // 2) passwordHash (alias)
       if (e?.code === "ER_BAD_FIELD_ERROR") {
         dbg.step = "query:passwordHash";
         const r2 = await pool.execute(
@@ -173,13 +292,11 @@ app.post(`${API}/driver/login`, async (req, res) => {
 
     let ok = false;
 
-    // Caso 1: hash bcrypt válido
     if (storedHash.startsWith("$2") && storedHash.length >= 50) {
       dbg.step = "bcrypt_compare";
       ok = await bcrypt.compare(password, storedHash);
       dbg.compareOk = ok;
     } else {
-      // Caso 2: parece texto plano -> migración automática
       dbg.step = "migrate_plain_password";
       if (password === storedHash) {
         const newHash = await bcrypt.hash(password, 10);
@@ -202,23 +319,13 @@ app.post(`${API}/driver/login`, async (req, res) => {
       return res.status(401).json({ error: "BAD_CREDENTIALS", dbg });
     }
 
-    const token = jwt.sign(
-      { id: m.id, email: m.email, role: "driver" },
-      SECRET,
-      { expiresIn: "8h" }
-    );
-
+    const token = jwt.sign({ id: m.id, email: m.email, role: "driver" }, SECRET, { expiresIn: "8h" });
     dbg.step = "done";
+
     return res.json({
       success: true,
       token,
-      user: {
-        id: m.id,
-        email: m.email,
-        role: "driver",
-        nombreCompleto: m.nombreCompleto,
-        dpi: m.dpi,
-      },
+      user: { id: m.id, email: m.email, role: "driver", nombreCompleto: m.nombreCompleto, dpi: m.dpi },
       // dbg, // descomenta si necesitas depurar
     });
   } catch (e) {
@@ -229,7 +336,6 @@ app.post(`${API}/driver/login`, async (req, res) => {
 });
 
 /* -------------------- REGISTRO PÚBLICO -------------------- */
-/* DEVUELVE motorista Y driver para compatibilidad con el front */
 app.post(`${API}/public/motoristas`, async (req, res) => {
   let cx;
   try {
@@ -258,7 +364,6 @@ app.post(`${API}/public/motoristas`, async (req, res) => {
     cx = await pool.getConnection();
     await cx.beginTransaction();
 
-    // Evita duplicados
     const [ex] = await cx.execute(
       `SELECT id FROM ${TABLE_MOTORISTAS} WHERE email = ? OR dpi = ? LIMIT 1`,
       [correoFinal, String(dpi).trim()]
@@ -268,7 +373,6 @@ app.post(`${API}/public/motoristas`, async (req, res) => {
       return res.status(409).json({ error: "Email o DPI ya existe" });
     }
 
-    // Hash de password
     const hash = await bcrypt.hash(String(password), 10);
 
     const [r] = await cx.execute(
@@ -279,15 +383,10 @@ app.post(`${API}/public/motoristas`, async (req, res) => {
     );
     const motoristaId = r.insertId;
 
-    // Si existe la columna alternativa passwordHash, sincronízala
     try {
-      await cx.execute(
-        `UPDATE ${TABLE_MOTORISTAS} SET passwordHash = ? WHERE id = ?`,
-        [hash, motoristaId]
-      );
+      await cx.execute(`UPDATE ${TABLE_MOTORISTAS} SET passwordHash = ? WHERE id = ?`, [hash, motoristaId]);
     } catch (_) {}
 
-    // Contactos (opcionales)
     const contactos = [];
     if (emergencia1Nombre || emergencia1Telefono) {
       contactos.push([motoristaId, emergencia1Nombre || null, emergencia1Telefono || null, 1]);
@@ -296,17 +395,12 @@ app.post(`${API}/public/motoristas`, async (req, res) => {
       contactos.push([motoristaId, emergencia2Nombre || null, emergencia2Telefono || null, 2]);
     }
     if (contactos.length) {
-      await cx.query(
-        `INSERT INTO ${TABLE_EMERGENCIA} (motorista_id, nombre, telefono, prioridad) VALUES ?`,
-        [contactos]
-      );
+      await cx.query(`INSERT INTO ${TABLE_EMERGENCIA} (motorista_id, nombre, telefono, prioridad) VALUES ?`, [contactos]);
     }
 
-    // Vehículo (opcional)
     if (hayVehiculo) {
       await cx.execute(
-        `INSERT INTO ${TABLE_VEHICULOS}
-           (motorista_id, placa, marca, modelo, anio, created_at)
+        `INSERT INTO ${TABLE_VEHICULOS} (motorista_id, placa, marca, modelo, anio, created_at)
          VALUES (?, ?, ?, ?, ?, NOW())`,
         [
           motoristaId,
@@ -318,7 +412,6 @@ app.post(`${API}/public/motoristas`, async (req, res) => {
       );
     }
 
-    // QR público
     const publicUrl = `${PUBLIC_BASE_URL}/emergency/${motoristaId}`;
     const qrImage = await QRCode.toDataURL(publicUrl);
 
@@ -337,7 +430,6 @@ app.post(`${API}/public/motoristas`, async (req, res) => {
       created_at: new Date().toISOString(),
     };
 
-    // DEVUELVE AMBOS NOMBRES: motorista y driver
     return res.status(201).json({
       success: true,
       motorista: persona,
@@ -533,171 +625,4 @@ server.on("error", (err) => {
   } else {
     console.error("Error al iniciar el servidor:", err);
   }
-});
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// ... (cabecera igual)
-const { pool, cfg, sslEnabled } = require("./db");
-
-// LOG de requests
-app.use((req, res, next) => {
-  const t0 = Date.now();
-  res.on("finish", () => {
-    const ms = Date.now() - t0;
-    console.log(`[HTTP] ${req.method} ${req.originalUrl} -> ${res.statusCode} (${ms}ms)`);
-  });
-  next();
-});
-
-// ---- ENDPOINTS DE DEBUG (no dejar activos en prod final) ----
-app.get("/__debug/env", (_req, res) => {
-  const mask = (s = "") => (s.length <= 6 ? "***" : s.slice(0,2) + "***" + s.slice(-2));
-  res.json({
-    NODE_ENV: process.env.NODE_ENV,
-    PORT: process.env.PORT,
-    API_PREFIX: process.env.API_PREFIX,
-    PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL,
-    MYSQL_URL: (() => {
-      try {
-        const u = new URL(process.env.MYSQL_URL || "");
-        return {
-          protocol: u.protocol,
-          host: u.hostname,
-          port: u.port,
-          user: u.username,
-          pass: mask(decodeURIComponent(u.password || "")),
-          db: (u.pathname || "").replace(/^\//,""),
-        };
-      } catch { return "INVALID_URL"; }
-    })(),
-    DB_SSL: process.env.DB_SSL,
-    sslEnabled,
-  });
-});
-
-app.get("/__debug/db/ping", async (_req, res) => {
-  try {
-    const [r] = await pool.query("SELECT 1 AS ok");
-    res.json({ ok: true, result: r[0] });
-  } catch (e) {
-    res.status(500).json({ ok: false, code: e.code || e.name, message: e.message });
-  }
-});
-
-app.get("/__debug/db/info", async (_req, res) => {
-  try {
-    const [v] = await pool.query("SELECT VERSION() AS version");
-    const [ts] = await pool.query("SELECT NOW() AS now_utc");
-    res.json({
-      ok: true,
-      version: v?.[0]?.version,
-      now_utc: ts?.[0]?.now_utc,
-      cfg: {
-        host: cfg.host,
-        port: cfg.port,
-        user: cfg.user,
-        database: cfg.database,
-        ssl: sslEnabled,
-      },
-    });
-  } catch (e) {
-    res.status(500).json({ ok: false, code: e.code || e.name, message: e.message });
-  }
-});
-
-
-// --- LOGS HTTP DETALLADOS + HISTORIAL ---
-const crypto = require("crypto");
-
-const lastRequests = [];
-const MAX_LAST = 200;
-
-function genId() {
-  return crypto.randomBytes(8).toString("hex");
-}
-
-app.use((req, res, next) => {
-  // toma request-id del cliente o genera uno nuevo
-  const reqId = req.get("x-request-id") || genId();
-  req.reqId = reqId;
-
-  const t0 = Date.now();
-  const { method } = req;
-  const url = req.originalUrl || req.url;
-
-  // anota info base (útil si el request se cae antes de 'finish')
-  const baseInfo = {
-    ts: new Date().toISOString(),
-    id: reqId,
-    method,
-    url,
-    ip: req.ip,
-    origin: req.get("origin") || null,
-    referer: req.get("referer") || null,
-    userAgent: req.get("user-agent") || null,
-  };
-
-  // agrega headers útiles a la respuesta
-  res.setHeader("x-request-id", reqId);
-  res.setHeader("x-backend", "qrmanager-api");
-  res.setHeader("x-api-prefix", API);
-
-  // hook al terminar
-  res.on("finish", () => {
-    const ms = Date.now() - t0;
-    const status = res.statusCode;
-    const length = res.getHeader("content-length") || "-";
-    const msg = [
-      `[HTTP] #${reqId}`,
-      method,
-      url,
-      "->", status,
-      `(${ms}ms, ${length}B)`,
-      `ip=${baseInfo.ip}`,
-      baseInfo.origin ? `origin=${baseInfo.origin}` : "",
-      baseInfo.referer ? `referer=${baseInfo.referer}` : "",
-    ].filter(Boolean).join(" ");
-
-    console.log(msg);
-
-    // guarda en historial
-    lastRequests.push({
-      ...baseInfo,
-      status,
-      ms,
-      length: String(length),
-    });
-    while (lastRequests.length > MAX_LAST) lastRequests.shift();
-  });
-
-  next();
-});
-
-// --- LOGS CORS / PRE-FLIGHT ---
-app.use((req, res, next) => {
-  if (req.method === "OPTIONS") {
-    console.log(`[CORS][PRE-FLIGHT] #${req.reqId} ${req.headers.origin || "-"} ${req.headers["access-control-request-method"] || "-"} ${req.originalUrl}`);
-  }
-  next();
-});
-
-// endpoint de historial (quítalo en prod si no lo necesitas)
-app.get("/__debug/last-requests", (_req, res) => {
-  res.json({
-    count: lastRequests.length,
-    items: lastRequests.slice().reverse().slice(0, 50), // últimas 50 (orden desc)
-  });
 });
