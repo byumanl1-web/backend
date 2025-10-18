@@ -30,7 +30,12 @@ const TABLE_INCIDENTES  = process.env.INCIDENTES_TABLE || "incidentes";
 const TABLE_QR_SCANS    = process.env.QR_SCANS_TABLE || "qr_scans";
 
 // URL pública del front para generar el QR
-const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "http://localhost:3000").trim();
+// Lee PUBLIC_BASE_URL y, si no existe, usa FRONTEND_URL (útil en Railway)
+const PUBLIC_BASE_URL = (
+  process.env.PUBLIC_BASE_URL ||
+  process.env.FRONTEND_URL ||
+  "http://localhost:3000"
+).trim();
 
 /* -------------------- MIDDLEWARES GLOBALES -------------------- */
 /** Opción A (abierto): permite cualquier origen, incluido *.up.railway.app */
@@ -309,7 +314,7 @@ app.get(`${API}/public/emergency/:id`, async (req, res) => {
     const [cRows] = await pool.execute(
       `SELECT nombre, telefono, prioridad
          FROM ${TABLE_EMERGENCIA}
-        WHERE motorista_id = ?
+        WHERE motorista_id = ? 
      ORDER BY prioridad ASC, id ASC
         LIMIT 1`,
       [id]
@@ -438,7 +443,12 @@ app.put(`${API}/driver/vehicle`, authRequired, requireDriver, async (req, res) =
 app.use(`${API}/admin`, authRequired, requireAdmin, adminRouter);
 app.use(`${API}/motoristas`, authRequired, requireAdmin, motoristasRouter);
 
-/* -------------------- HEALTHCHECK -------------------- */
+/* -------------------- HEALTHCHECKS -------------------- */
+// Health sin prefijo para probar el dominio público
+app.get("/", (_req, res) => {
+  res.json({ ok: true, apiPrefix: API, uptime: process.uptime() });
+});
+// Health con prefijo (ya estaba)
 app.get(`${API}/health`, (_req, res) => res.json({ ok: true }));
 
 /* -------------------- LISTEN -------------------- */
