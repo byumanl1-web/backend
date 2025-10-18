@@ -534,3 +534,170 @@ server.on("error", (err) => {
     console.error("Error al iniciar el servidor:", err);
   }
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// ... (cabecera igual)
+const { pool, cfg, sslEnabled } = require("./db");
+
+// LOG de requests
+app.use((req, res, next) => {
+  const t0 = Date.now();
+  res.on("finish", () => {
+    const ms = Date.now() - t0;
+    console.log(`[HTTP] ${req.method} ${req.originalUrl} -> ${res.statusCode} (${ms}ms)`);
+  });
+  next();
+});
+
+// ---- ENDPOINTS DE DEBUG (no dejar activos en prod final) ----
+app.get("/__debug/env", (_req, res) => {
+  const mask = (s = "") => (s.length <= 6 ? "***" : s.slice(0,2) + "***" + s.slice(-2));
+  res.json({
+    NODE_ENV: process.env.NODE_ENV,
+    PORT: process.env.PORT,
+    API_PREFIX: process.env.API_PREFIX,
+    PUBLIC_BASE_URL: process.env.PUBLIC_BASE_URL,
+    MYSQL_URL: (() => {
+      try {
+        const u = new URL(process.env.MYSQL_URL || "");
+        return {
+          protocol: u.protocol,
+          host: u.hostname,
+          port: u.port,
+          user: u.username,
+          pass: mask(decodeURIComponent(u.password || "")),
+          db: (u.pathname || "").replace(/^\//,""),
+        };
+      } catch { return "INVALID_URL"; }
+    })(),
+    DB_SSL: process.env.DB_SSL,
+    sslEnabled,
+  });
+});
+
+app.get("/__debug/db/ping", async (_req, res) => {
+  try {
+    const [r] = await pool.query("SELECT 1 AS ok");
+    res.json({ ok: true, result: r[0] });
+  } catch (e) {
+    res.status(500).json({ ok: false, code: e.code || e.name, message: e.message });
+  }
+});
+
+app.get("/__debug/db/info", async (_req, res) => {
+  try {
+    const [v] = await pool.query("SELECT VERSION() AS version");
+    const [ts] = await pool.query("SELECT NOW() AS now_utc");
+    res.json({
+      ok: true,
+      version: v?.[0]?.version,
+      now_utc: ts?.[0]?.now_utc,
+      cfg: {
+        host: cfg.host,
+        port: cfg.port,
+        user: cfg.user,
+        database: cfg.database,
+        ssl: sslEnabled,
+      },
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, code: e.code || e.name, message: e.message });
+  }
+});
+
+
+// --- LOGS HTTP DETALLADOS + HISTORIAL ---
+const crypto = require("crypto");
+
+const lastRequests = [];
+const MAX_LAST = 200;
+
+function genId() {
+  return crypto.randomBytes(8).toString("hex");
+}
+
+app.use((req, res, next) => {
+  // toma request-id del cliente o genera uno nuevo
+  const reqId = req.get("x-request-id") || genId();
+  req.reqId = reqId;
+
+  const t0 = Date.now();
+  const { method } = req;
+  const url = req.originalUrl || req.url;
+
+  // anota info base (útil si el request se cae antes de 'finish')
+  const baseInfo = {
+    ts: new Date().toISOString(),
+    id: reqId,
+    method,
+    url,
+    ip: req.ip,
+    origin: req.get("origin") || null,
+    referer: req.get("referer") || null,
+    userAgent: req.get("user-agent") || null,
+  };
+
+  // agrega headers útiles a la respuesta
+  res.setHeader("x-request-id", reqId);
+  res.setHeader("x-backend", "qrmanager-api");
+  res.setHeader("x-api-prefix", API);
+
+  // hook al terminar
+  res.on("finish", () => {
+    const ms = Date.now() - t0;
+    const status = res.statusCode;
+    const length = res.getHeader("content-length") || "-";
+    const msg = [
+      `[HTTP] #${reqId}`,
+      method,
+      url,
+      "->", status,
+      `(${ms}ms, ${length}B)`,
+      `ip=${baseInfo.ip}`,
+      baseInfo.origin ? `origin=${baseInfo.origin}` : "",
+      baseInfo.referer ? `referer=${baseInfo.referer}` : "",
+    ].filter(Boolean).join(" ");
+
+    console.log(msg);
+
+    // guarda en historial
+    lastRequests.push({
+      ...baseInfo,
+      status,
+      ms,
+      length: String(length),
+    });
+    while (lastRequests.length > MAX_LAST) lastRequests.shift();
+  });
+
+  next();
+});
+
+// --- LOGS CORS / PRE-FLIGHT ---
+app.use((req, res, next) => {
+  if (req.method === "OPTIONS") {
+    console.log(`[CORS][PRE-FLIGHT] #${req.reqId} ${req.headers.origin || "-"} ${req.headers["access-control-request-method"] || "-"} ${req.originalUrl}`);
+  }
+  next();
+});
+
+// endpoint de historial (quítalo en prod si no lo necesitas)
+app.get("/__debug/last-requests", (_req, res) => {
+  res.json({
+    count: lastRequests.length,
+    items: lastRequests.slice().reverse().slice(0, 50), // últimas 50 (orden desc)
+  });
+});
