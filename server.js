@@ -39,8 +39,8 @@ const PUBLIC_BASE_URL = (
 /* -------------------- MIDDLEWARES GLOBALES -------------------- */
 app.use(
   cors({
-    origin: true,      // permite todos los origins (útil para *.up.railway.app)
-    credentials: true, // no usamos cookies, pero no estorba
+    origin: true,       // permite cualquier origen (útil para *.up.railway.app)
+    credentials: true,  // no usamos cookies, pero no estorba
   })
 );
 app.use(express.json({ limit: "2mb" }));
@@ -66,7 +66,6 @@ async function setPasswordHash(userId, hash) {
       [hash, userId]
     );
   } catch (e2) {
-    // si tampoco existe, lo dejamos registrado en logs
     console.error("[setPasswordHash] No existe password_hash/passwordHash:", e2?.message || e2);
     throw e2;
   }
@@ -100,9 +99,9 @@ function requireDriver(req, res, next) {
 
 /* -------------------- LOGIN ADMIN -------------------- */
 /*
- * IMPORTANTE: esto usa ADMIN_EMAIL y ADMIN_PASS de variables de entorno.
- * Dejamos un fallback temporal con tus credenciales para que puedas entrar YA.
- * Luego ponlas en Railway -> Variables y quita este fallback por seguridad.
+ * IMPORTANTE:
+ * Usa ADMIN_EMAIL y ADMIN_PASS desde variables de entorno.
+ * Fallback temporal con tus credenciales: cámbialas en Railway y luego elimina este fallback.
  */
 app.post(`${API}/login`, (req, res) => {
   const email = safeEmail(req.body?.email);
@@ -189,7 +188,6 @@ app.post(`${API}/driver/login`, async (req, res) => {
           ok = true;
           dbg.migrated = true;
         } catch (e) {
-          // si falla la migración, igual no bloqueamos el login
           console.error("[driver/login] migrate setPasswordHash error:", e?.message || e);
           ok = true;
           dbg.migrated = false;
@@ -221,8 +219,7 @@ app.post(`${API}/driver/login`, async (req, res) => {
         nombreCompleto: m.nombreCompleto,
         dpi: m.dpi,
       },
-      // quítalo cuando confirmes
-      // dbg,
+      // dbg, // descomenta si necesitas depurar
     });
   } catch (e) {
     console.error("[POST /driver/login] ERROR", e);
@@ -232,6 +229,7 @@ app.post(`${API}/driver/login`, async (req, res) => {
 });
 
 /* -------------------- REGISTRO PÚBLICO -------------------- */
+/* DEVUELVE motorista Y driver para compatibilidad con el front */
 app.post(`${API}/public/motoristas`, async (req, res) => {
   let cx;
   try {
@@ -260,6 +258,7 @@ app.post(`${API}/public/motoristas`, async (req, res) => {
     cx = await pool.getConnection();
     await cx.beginTransaction();
 
+    // Evita duplicados
     const [ex] = await cx.execute(
       `SELECT id FROM ${TABLE_MOTORISTAS} WHERE email = ? OR dpi = ? LIMIT 1`,
       [correoFinal, String(dpi).trim()]
@@ -269,6 +268,7 @@ app.post(`${API}/public/motoristas`, async (req, res) => {
       return res.status(409).json({ error: "Email o DPI ya existe" });
     }
 
+    // Hash de password
     const hash = await bcrypt.hash(String(password), 10);
 
     const [r] = await cx.execute(
@@ -279,7 +279,7 @@ app.post(`${API}/public/motoristas`, async (req, res) => {
     );
     const motoristaId = r.insertId;
 
-    // Por compatibilidad, si existe passwordHash, espéjalo
+    // Si existe la columna alternativa passwordHash, sincronízala
     try {
       await cx.execute(
         `UPDATE ${TABLE_MOTORISTAS} SET passwordHash = ? WHERE id = ?`,
@@ -287,6 +287,7 @@ app.post(`${API}/public/motoristas`, async (req, res) => {
       );
     } catch (_) {}
 
+    // Contactos (opcionales)
     const contactos = [];
     if (emergencia1Nombre || emergencia1Telefono) {
       contactos.push([motoristaId, emergencia1Nombre || null, emergencia1Telefono || null, 1]);
@@ -301,6 +302,7 @@ app.post(`${API}/public/motoristas`, async (req, res) => {
       );
     }
 
+    // Vehículo (opcional)
     if (hayVehiculo) {
       await cx.execute(
         `INSERT INTO ${TABLE_VEHICULOS}
@@ -316,6 +318,7 @@ app.post(`${API}/public/motoristas`, async (req, res) => {
       );
     }
 
+    // QR público
     const publicUrl = `${PUBLIC_BASE_URL}/emergency/${motoristaId}`;
     const qrImage = await QRCode.toDataURL(publicUrl);
 
@@ -326,11 +329,19 @@ app.post(`${API}/public/motoristas`, async (req, res) => {
 
     await cx.commit(); cx.release();
 
+    const persona = {
+      id: motoristaId,
+      nombreCompleto,
+      dpi,
+      email: correoFinal,
+      created_at: new Date().toISOString(),
+    };
+
+    // DEVUELVE AMBOS NOMBRES: motorista y driver
     return res.status(201).json({
       success: true,
-      driver: {
-        id: motoristaId, nombreCompleto, dpi, email: correoFinal, created_at: new Date().toISOString(),
-      },
+      motorista: persona,
+      driver: persona,
       vehiculo: hayVehiculo ? {
         placa: placa ? String(placa).toUpperCase() : null,
         marca: marca || null,
