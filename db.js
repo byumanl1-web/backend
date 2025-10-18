@@ -2,6 +2,7 @@
 require("dotenv").config();
 const mysql = require("mysql2/promise");
 
+<<<<<<< HEAD
 /* ---------------------------------------------
    Utilidades
 ----------------------------------------------*/
@@ -34,6 +35,31 @@ function required(name, value) {
     throw new Error(`[DB] Falta variable de entorno: ${name}`);
   }
 }
+=======
+/**
+ * Toma primero las variables DB_* (las que tú pones en el servicio backend)
+ * y, si no están, usa las que expone Railway en el servicio MySQL (MYSQL*).
+ * Si aún así falta alguna, lanza error explícito.
+ */
+function take(nameA, nameB) {
+  return process.env[nameA] ?? process.env[nameB] ?? null;
+}
+function required(nameLabel, value) {
+  if (value === null || value === undefined || value === "") {
+    throw new Error(`[DB] Falta variable de entorno: ${nameLabel}`);
+  }
+  return value;
+}
+
+const DB_HOST = required("DB_HOST/MYSQLHOST", take("DB_HOST", "MYSQLHOST"));
+const DB_PORT = Number(required("DB_PORT/MYSQLPORT", take("DB_PORT", "MYSQLPORT")));
+const DB_USER = required("DB_USER/MYSQLUSER", take("DB_USER", "MYSQLUSER"));
+const DB_PASSWORD = required(
+  "DB_PASSWORD/MYSQLPASSWORD",
+  take("DB_PASSWORD", "MYSQLPASSWORD")
+);
+const DB_NAME = required("DB_NAME/MYSQLDATABASE", take("DB_NAME", "MYSQLDATABASE"));
+>>>>>>> c7df2cf (cambio de apis)
 
 /* ---------------------------------------------
    Lectura de variables de entorno
@@ -104,12 +130,18 @@ const pool = mysql.createPool({
   connectionLimit: 10,
   queueLimit: 0,
   charset: "utf8mb4_unicode_ci",
+<<<<<<< HEAD
   timezone: "Z", // UTC
   multipleStatements: false, // seguridad
+=======
+  timezone: "Z",           // Fechas en UTC
+  multipleStatements: false, // Seguridad
+>>>>>>> c7df2cf (cambio de apis)
   enableKeepAlive: true,
   keepAliveInitialDelay: 0,
 });
 
+<<<<<<< HEAD
 /* ---------------------------------------------
    Probar conexión al arrancar (sin tumbar proceso)
 ----------------------------------------------*/
@@ -126,6 +158,17 @@ const pool = mysql.createPool({
       "[DB] Error conectando a MySQL:",
       err && (err.sqlMessage || err.message || err)
     );
+=======
+// Ping de verificación al arrancar (no tumba el proceso si falla)
+(async () => {
+  try {
+    const [rows] = await pool.query("SELECT 1 AS ok");
+    console.log(
+      `[DB] Conectado OK: user=@host:port/db => ${DB_USER}@${DB_HOST}:${DB_PORT}/${DB_NAME} OK=${rows?.[0]?.ok}`
+    );
+  } catch (err) {
+    console.error("[DB] Error conectando a MySQL:", err?.message || err);
+>>>>>>> c7df2cf (cambio de apis)
   }
 })();
 
