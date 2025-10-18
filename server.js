@@ -30,7 +30,6 @@ const TABLE_INCIDENTES  = process.env.INCIDENTES_TABLE || "incidentes";
 const TABLE_QR_SCANS    = process.env.QR_SCANS_TABLE || "qr_scans";
 
 // URL pública del front para generar el QR
-// Lee PUBLIC_BASE_URL y, si no existe, usa FRONTEND_URL (útil en Railway)
 const PUBLIC_BASE_URL = (
   process.env.PUBLIC_BASE_URL ||
   process.env.FRONTEND_URL ||
@@ -38,19 +37,40 @@ const PUBLIC_BASE_URL = (
 ).trim();
 
 /* -------------------- MIDDLEWARES GLOBALES -------------------- */
-/** Opción A (abierto): permite cualquier origen, incluido *.up.railway.app */
 app.use(
   cors({
-    origin: true,       // refleja el Origin del request (permite todos)
-    credentials: true,  // no usamos cookies, pero no estorba
+    origin: true,      // permite todos los origins (útil para *.up.railway.app)
+    credentials: true, // no usamos cookies, pero no estorba
   })
 );
-
 app.use(express.json({ limit: "2mb" }));
 
 /* -------------------- HELPERS -------------------- */
-const normStr = (v) => (typeof v === "string" ? v.trim() : v);
+const normStr  = (v) => (typeof v === "string" ? v.trim() : v);
 const safeEmail = (v) => (normStr(v) || "").toString().trim().toLowerCase();
+
+async function setPasswordHash(userId, hash) {
+  // Intenta guardar en password_hash; si no existe, en passwordHash
+  try {
+    await pool.execute(
+      `UPDATE ${TABLE_MOTORISTAS} SET password_hash = ? WHERE id = ?`,
+      [hash, userId]
+    );
+    return;
+  } catch (e) {
+    if (e?.code !== "ER_BAD_FIELD_ERROR") throw e;
+  }
+  try {
+    await pool.execute(
+      `UPDATE ${TABLE_MOTORISTAS} SET passwordHash = ? WHERE id = ?`,
+      [hash, userId]
+    );
+  } catch (e2) {
+    // si tampoco existe, lo dejamos registrado en logs
+    console.error("[setPasswordHash] No existe password_hash/passwordHash:", e2?.message || e2);
+    throw e2;
+  }
+}
 
 /* -------------------- AUTH MIDDLEWARES -------------------- */
 function authRequired(req, res, next) {
@@ -79,12 +99,17 @@ function requireDriver(req, res, next) {
 }
 
 /* -------------------- LOGIN ADMIN -------------------- */
+/*
+ * IMPORTANTE: esto usa ADMIN_EMAIL y ADMIN_PASS de variables de entorno.
+ * Dejamos un fallback temporal con tus credenciales para que puedas entrar YA.
+ * Luego ponlas en Railway -> Variables y quita este fallback por seguridad.
+ */
 app.post(`${API}/login`, (req, res) => {
   const email = safeEmail(req.body?.email);
   const thePassword = (req.body?.password || "").trim();
 
-  const ADMIN_EMAIL = safeEmail(process.env.ADMIN_EMAIL || "");
-  const ADMIN_PASS  = (process.env.ADMIN_PASS || "").trim();
+  const ADMIN_EMAIL = safeEmail(process.env.ADMIN_EMAIL || "estuardolorenzo@gmail.com");
+  const ADMIN_PASS  = (process.env.ADMIN_PASS  || "Lorenzo21").trim();
 
   if (email === ADMIN_EMAIL && thePassword === ADMIN_PASS) {
     const token = jwt.sign({ id: 1, email, role: "admin" }, SECRET, { expiresIn: "8h" });
@@ -93,7 +118,7 @@ app.post(`${API}/login`, (req, res) => {
   return res.status(401).json({ success: false, error: "BAD_CREDENTIALS" });
 });
 
-/* -------------- LOGIN MOTORISTA (tolerante a schema) -------------- */
+/* -------------- LOGIN MOTORISTA (tolerante + auto-migración) -------------- */
 app.post(`${API}/driver/login`, async (req, res) => {
   const dbg = { step: "start" };
   try {
@@ -143,19 +168,36 @@ app.post(`${API}/driver/login`, async (req, res) => {
 
     const m = rows[0];
     const storedHash = m.password_hash || "";
-
     dbg.step = "inspect_hash";
     dbg.hashLen = storedHash.length;
     dbg.hashPrefix = storedHash.slice(0, 4);
 
-    if (!storedHash || storedHash.length < 50) {
-      dbg.err = "PASSWORD_HASH_INVALID";
-      return res.status(500).json({ error: "PASSWORD_HASH_INVALID", dbg });
-    }
+    let ok = false;
 
-    dbg.step = "bcrypt_compare";
-    const ok = await bcrypt.compare(password, storedHash);
-    dbg.compareOk = ok;
+    // Caso 1: hash bcrypt válido
+    if (storedHash.startsWith("$2") && storedHash.length >= 50) {
+      dbg.step = "bcrypt_compare";
+      ok = await bcrypt.compare(password, storedHash);
+      dbg.compareOk = ok;
+    } else {
+      // Caso 2: parece texto plano -> migración automática
+      dbg.step = "migrate_plain_password";
+      if (password === storedHash) {
+        const newHash = await bcrypt.hash(password, 10);
+        try {
+          await setPasswordHash(m.id, newHash);
+          ok = true;
+          dbg.migrated = true;
+        } catch (e) {
+          // si falla la migración, igual no bloqueamos el login
+          console.error("[driver/login] migrate setPasswordHash error:", e?.message || e);
+          ok = true;
+          dbg.migrated = false;
+        }
+      } else {
+        ok = false;
+      }
+    }
 
     if (!ok) {
       dbg.err = "COMPARE_FALSE";
@@ -179,7 +221,8 @@ app.post(`${API}/driver/login`, async (req, res) => {
         nombreCompleto: m.nombreCompleto,
         dpi: m.dpi,
       },
-      dbg, // quítalo cuando confirmes
+      // quítalo cuando confirmes
+      // dbg,
     });
   } catch (e) {
     console.error("[POST /driver/login] ERROR", e);
@@ -235,6 +278,14 @@ app.post(`${API}/public/motoristas`, async (req, res) => {
       [nombreCompleto, dpi, numeroCasa || null, nombrePadre || null, nombreMadre || null, correoFinal, hash]
     );
     const motoristaId = r.insertId;
+
+    // Por compatibilidad, si existe passwordHash, espéjalo
+    try {
+      await cx.execute(
+        `UPDATE ${TABLE_MOTORISTAS} SET passwordHash = ? WHERE id = ?`,
+        [hash, motoristaId]
+      );
+    } catch (_) {}
 
     const contactos = [];
     if (emergencia1Nombre || emergencia1Telefono) {
@@ -314,7 +365,7 @@ app.get(`${API}/public/emergency/:id`, async (req, res) => {
     const [cRows] = await pool.execute(
       `SELECT nombre, telefono, prioridad
          FROM ${TABLE_EMERGENCIA}
-        WHERE motorista_id = ? 
+        WHERE motorista_id = ?
      ORDER BY prioridad ASC, id ASC
         LIMIT 1`,
       [id]
@@ -444,11 +495,9 @@ app.use(`${API}/admin`, authRequired, requireAdmin, adminRouter);
 app.use(`${API}/motoristas`, authRequired, requireAdmin, motoristasRouter);
 
 /* -------------------- HEALTHCHECKS -------------------- */
-// Health sin prefijo para probar el dominio público
 app.get("/", (_req, res) => {
   res.json({ ok: true, apiPrefix: API, uptime: process.uptime() });
 });
-// Health con prefijo (ya estaba)
 app.get(`${API}/health`, (_req, res) => res.json({ ok: true }));
 
 /* -------------------- LISTEN -------------------- */
